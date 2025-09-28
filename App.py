@@ -11,6 +11,12 @@ from langchain.embeddings import HuggingFaceBgeEmbeddings
 from langchain.vectorstores import Chroma
 from langchain.chains import RetrievalQA
 from langchain.document_loaders import PyPDFLoader
+import os
+from langchain_groq import ChatGroq
+
+groq_api_key = os.getenv("GROQ_API_KEY")
+llm = ChatGroq(model="llama-3.1-8b-instant", api_key=groq_api_key)
+
 
 
 # ================== CUSTOM CSS ==================
@@ -237,3 +243,4 @@ if prompt:
     save_message(st.session_state.current_session_id, "assistant", assistant_reply)
 
     st.rerun()
+
