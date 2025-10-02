@@ -163,7 +163,12 @@ if not st.session_state.logged_in:
     if st.button(option):
         if option == "Register":
             success, msg = register_user(username, password)
-            st.success(msg) if success else st.error(msg)
+            
+            if success:
+                st.success(msg)
+            else:
+                st.error(msg)
+
         else:
             success, user_id = login_user(username, password)
             if success:
@@ -303,3 +308,4 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
