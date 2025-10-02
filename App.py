@@ -147,18 +147,18 @@ def generate_session_name(llm, first_message: str) -> str:
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
    response_text = assistant_reply.content
-words = response_text.split()
+    words = response_text.split()
 
-typed_text = ""
-placeholder = st.empty()
+    typed_text = ""
+    placeholder = st.empty()
 
-for word in words:
-    typed_text += word + " "
-    placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
-    time.sleep(0.05)  # adjust speed
+    for word in words:
+        typed_text += word + " "
+        placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
+        time.sleep(0.05)  # adjust speed
 
-st.session_state.messages.append({"role": "assistant", "content": response_text})
-save_message(st.session_state.current_session_id, "assistant", response_text)
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+    save_message(st.session_state.current_session_id, "assistant", response_text)
 
     db = get_db()
     sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
@@ -409,4 +409,5 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
 
