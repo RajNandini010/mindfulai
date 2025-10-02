@@ -23,7 +23,6 @@ def get_db():
     client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
     return client["chat_app"]
 
-
 # ================== USERS ==================
 def register_user(username, email, password):
     if not is_valid_email(email):
@@ -121,10 +120,6 @@ def load_llm():
         model_name="llama-3.1-8b-instant"
     )
 
-if "llm" not in st.session_state:
-    st.session_state.llm = load_llm()
-
-
 def get_chat_history_for_llm(messages):
     history = []
     for msg in messages:
@@ -151,7 +146,7 @@ def handle_suggestion(suggestion_text):
 
     db = get_db()
     sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
-    current_name = sessions.get("session_name", "New Chat")
+    current_name = sessions.get("session_name", "New Chat") if sessions else "New Chat"
 
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
@@ -221,7 +216,7 @@ if not st.session_state.logged_in:
 
 # ========== INITIALIZE SESSION STATE ==========
 if "llm" not in st.session_state:
-    st.session_state.llm = initialize_llm()
+    st.session_state.llm = load_llm()
 
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
@@ -252,7 +247,7 @@ with st.sidebar:
     st.title("💬 Mindful AI")
     
     if "username" in st.session_state:
-        st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
+        st.markdown(f"### 👤 {st.session_state.username}")
     
     st.write("Your conversations")
 
@@ -266,22 +261,20 @@ with st.sidebar:
         st.rerun()
 
     db = get_db()
-    sessions = db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1)
-
-    st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
+    sessions = list(db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1).limit(15))
 
     for s in sessions:
-        msgs = get_session_messages(s["session_id"])
-        if not msgs:
+        msg_count = db["chat_messages"].count_documents({"session_id": s["session_id"]}, limit=1)
+        if msg_count == 0:
             continue
 
-        display_name = s.get("session_name", "New Chat")
+        display_name = s.get("session_name", "New Chat")[:40]
 
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
             if st.button(display_name, key=s["session_id"]):
                 st.session_state.current_session_id = s["session_id"]
-                st.session_state.messages = msgs
+                st.session_state.messages = get_session_messages(s["session_id"])
                 st.session_state.show_suggestions = False
                 st.rerun()
         with col2:
@@ -297,24 +290,16 @@ with st.sidebar:
                     st.session_state.show_suggestions = True
                 st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
     if st.button("🚪 Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.session_state.logged_in = False
         st.rerun()
 
-# ========== CHAT UI ==========
-chat_container = st.container()
-with chat_container:
-    st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f'<div class="user-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+# ========== CHAT UI WITH STREAMING ==========
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
 # ========== SUGGESTION BUTTONS ==========
 if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
@@ -323,9 +308,7 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
     suggestions = [
         "😰 I'm feeling anxious today",
         "😔 How to cope with stress?",
-        "🧘 Mindfulness exercises",
-        "💤 Tips for better sleep",
-        "🎯 Setting healthy goals"
+        "🧘 Mindfulness exercises"
     ]
     
     cols = st.columns(len(suggestions))
@@ -335,11 +318,15 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
                 handle_suggestion(suggestion)
                 st.rerun()
 
-# ========== USER INPUT ==========
+# ========== USER INPUT WITH STREAMING ==========
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
+    # Display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
     save_message(st.session_state.current_session_id, "user", prompt)
 
     db = get_db()
@@ -354,51 +341,22 @@ if prompt:
         "chat_history": chat_history,
         "input": prompt
     })
-    assistant_reply = st.session_state.llm.invoke(formatted)
-
-    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
-    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
+    
+    # Stream the assistant response
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+        
+        # Stream response from LLM
+        for chunk in st.session_state.llm.stream(formatted):
+            full_response += chunk.content
+            message_placeholder.markdown(full_response + "▌")
+        
+        message_placeholder.markdown(full_response)
+    
+    # Save complete response
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    save_message(st.session_state.current_session_id, "assistant", full_response)
     
     st.session_state.show_suggestions = False
     st.rerun()
-
-# ================== CUSTOM CSS ==================
-st.markdown("""
-<style>
-.chat-messages {
-    max-height: calc(100vh - 15rem);
-    overflow-y: auto;
-    padding: 1rem 2rem;
-}
-.user-message {
-    display: flex;
-    justify-content: flex-end;
-    margin-left: 2rem;
-    margin-bottom: 1rem;
-}
-.user-message .markdown {
-    background: #10a37f;
-    color: white;
-    padding: 0.8rem 1.2rem;
-    border-radius: 20px 20px 5px 20px;
-    max-width: 70%;
-}
-.assistant-message {
-    display: flex;
-    justify-content: flex-start;
-    margin-right: 2rem;
-    margin-bottom: 1rem;
-}
-.assistant-message .markdown {
-    background: #f5f5f5;
-    color: #222;
-    padding: 0.8rem 1.2rem;
-    border-radius: 20px 20px 20px 5px;
-    max-width: 70%;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-
-
