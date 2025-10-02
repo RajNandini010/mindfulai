@@ -3,7 +3,6 @@ import os
 import re
 import bcrypt
 import streamlit as st
-import time
 from datetime import datetime
 from pymongo import MongoClient
 
@@ -13,6 +12,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # ================== EMAIL VALIDATION ==================
 def is_valid_email(email):
+    """Validate email format using regex"""
     pattern = r'^[\w\.-]+@[a-zA-Z\d-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
@@ -22,6 +22,7 @@ def get_db():
     mongo_uri = st.secrets["MONGO_URI"]
     client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
     return client["chat_app"]
+
 
 # ================== USERS ==================
 def register_user(username, email, password):
@@ -87,6 +88,7 @@ def save_message(session_id, message_type, content):
 def get_session_messages(session_id):
     db = get_db()
     messages = db["chat_messages"].find({"session_id": session_id}).sort("timestamp", 1)
+    
     results = []
     for m in messages:
         results.append({
@@ -122,6 +124,7 @@ def load_llm():
 if "llm" not in st.session_state:
     st.session_state.llm = load_llm()
 
+
 def get_chat_history_for_llm(messages):
     history = []
     for msg in messages:
@@ -141,25 +144,28 @@ def generate_session_name(llm, first_message: str) -> str:
     except Exception:
         return "New Chat"
 
-# ================== SUGGESTION GENERATOR ==================
-def generate_suggestions(llm, last_user_message, num_suggestions=3):
-    prompt = f"""
-    Based on the conversation so far, suggest {num_suggestions} possible next questions the user might ask.
-    Provide them as a short list separated by semicolons.
-    Last user message: {last_user_message}
-    """
-    formatted = prompt_template.invoke({
-        "chat_history": get_chat_history_for_llm(st.session_state.messages),
-        "input": prompt
-    })
-    response = llm.invoke(formatted)
-    suggestions = response.content.split(";")
-    return [s.strip() for s in suggestions if s.strip()]
-
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
-    st.session_state.messages.append({"role": "user", "content": suggestion_text})
-    save_message(st.session_state.current_session_id, "user", suggestion_text)
+    response_text = assistant_reply.content
+    words = response_text.split()
+
+    typed_text = ""
+    placeholder = st.empty()
+
+    for word in words:
+        typed_text += word + " "
+        placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
+        time.sleep(0.05)  # adjust speed
+
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+    save_message(st.session_state.current_session_id, "assistant", response_text)
+
+    db = get_db()
+    sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
+    current_name = sessions.get("session_name", "New Chat")
+
+    if current_name == "New Chat":
+        update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
 
     chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
     formatted = prompt_template.invoke({
@@ -168,20 +174,10 @@ def handle_suggestion(suggestion_text):
     })
     assistant_reply = st.session_state.llm.invoke(formatted)
 
-    # Word-by-word typing effect
-    words = assistant_reply.content.split()
-    typed_text = ""
-    placeholder = st.empty()
-    for word in words:
-        typed_text += word + " "
-        placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
-        time.sleep(0.05)
-
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
 
-    st.session_state.suggestions = generate_suggestions(st.session_state.llm, suggestion_text, num_suggestions=3)
-    st.session_state.show_suggestions = True
+    st.session_state.show_suggestions = False
 
 # ================== STREAMLIT APP ==================
 if "logged_in" not in st.session_state:
@@ -189,12 +185,14 @@ if "logged_in" not in st.session_state:
 
 if not st.session_state.logged_in:
     st.title("🔒 Login or Register")
+
     option = st.radio("Choose action", ("Login", "Register"))
 
     if option == "Register":
         username = st.text_input("Username")
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
+        
         if st.button("Register"):
             if not username:
                 st.error("Please enter a username")
@@ -209,9 +207,11 @@ if not st.session_state.logged_in:
                     st.info("Please login with your credentials")
                 else:
                     st.error(msg)
-    else:
+    
+    else:  # Login
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
+        
         if st.button("Login"):
             success, user_id, username = login_user(email, password)
             if success:
@@ -227,11 +227,12 @@ if not st.session_state.logged_in:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
+    
     st.stop()
 
 # ========== INITIALIZE SESSION STATE ==========
 if "llm" not in st.session_state:
-    st.session_state.llm = load_llm()
+    st.session_state.llm = initialize_llm()
 
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
@@ -257,11 +258,13 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-# ================== SIDEBAR ==================
+# ========== SIDEBAR ==========
 with st.sidebar:
     st.title("💬 Mindful AI")
+    
     if "username" in st.session_state:
         st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
+    
     st.write("Your conversations")
 
     if st.button("➕ New Chat"):
@@ -275,13 +278,16 @@ with st.sidebar:
 
     db = get_db()
     sessions = db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1)
+
     st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
 
     for s in sessions:
         msgs = get_session_messages(s["session_id"])
         if not msgs:
             continue
+
         display_name = s.get("session_name", "New Chat")
+
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
             if st.button(display_name, key=s["session_id"]):
@@ -303,13 +309,14 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
+
     if st.button("🚪 Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.session_state.logged_in = False
         st.rerun()
 
-# ================== CHAT UI ==================
+# ========== CHAT UI ==========
 chat_container = st.container()
 with chat_container:
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
@@ -320,17 +327,26 @@ with chat_container:
             st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ================== SUGGESTION BUTTONS ==================
-if st.session_state.show_suggestions and "suggestions" in st.session_state:
-    st.markdown("### 💡 You might also ask:")
-    cols = st.columns(len(st.session_state.suggestions))
-    for idx, suggestion in enumerate(st.session_state.suggestions):
+# ========== SUGGESTION BUTTONS ==========
+if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
+    st.markdown("### 💡 Try asking about:")
+    
+    suggestions = [
+        "😰 I'm feeling anxious today",
+        "😔 How to cope with stress?",
+        "🧘 Mindfulness exercises",
+        "💤 Tips for better sleep",
+        "🎯 Setting healthy goals"
+    ]
+    
+    cols = st.columns(len(suggestions))
+    for idx, suggestion in enumerate(suggestions):
         with cols[idx]:
             if st.button(suggestion, key=f"suggestion_{idx}"):
                 handle_suggestion(suggestion)
                 st.rerun()
 
-# ================== USER INPUT ==================
+# ========== USER INPUT ==========
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
@@ -351,20 +367,10 @@ if prompt:
     })
     assistant_reply = st.session_state.llm.invoke(formatted)
 
-    # Word-by-word typing effect
-    words = assistant_reply.content.split()
-    typed_text = ""
-    placeholder = st.empty()
-    for word in words:
-        typed_text += word + " "
-        placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
-        time.sleep(0.05)
-
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
-
-    st.session_state.suggestions = generate_suggestions(st.session_state.llm, prompt, num_suggestions=3)
-    st.session_state.show_suggestions = True
+    
+    st.session_state.show_suggestions = False
     st.rerun()
 
 # ================== CUSTOM CSS ==================
