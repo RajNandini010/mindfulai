@@ -1,14 +1,14 @@
 import uuid
-import sqlite3
-from datetime import datetime
 import os
 import re
 import bcrypt
 import streamlit as st
+from datetime import datetime
+from pymongo import MongoClient
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 # ================== EMAIL VALIDATION ==================
 def is_valid_email(email):
@@ -16,112 +16,85 @@ def is_valid_email(email):
     pattern = r'^[\w\.-]+@[a-zA-Z\d-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# ================== DATABASE ==================
-def init_database():
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
+# ================== DATABASE CONNECTION ==================
+def get_db():
+    mongo_uri = st.secrets["MONGO_URI"]
+    client = MongoClient(mongo_uri)
+    db = client["chat_app"]   # database name
+    return db
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            email TEXT UNIQUE,
-            password TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            session_id TEXT,
-            session_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            message_type TEXT,
-            content TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
+# ================== USERS ==================
 def register_user(username, email, password):
     if not is_valid_email(email):
         return False, "Invalid email format"
     
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-    try:
-        cursor.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", 
-                      (username, email, hashed_pw))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
+    db = get_db()
+    users = db["users"]
+
+    if users.find_one({"email": email}):
         return False, "Email already exists"
-    conn.close()
+    
+    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+    users.insert_one({
+        "username": username,
+        "email": email,
+        "password": hashed_pw,
+        "created_at": datetime.utcnow()
+    })
     return True, "Registration successful"
 
 def login_user(email, password):
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, password FROM users WHERE email=?", (email,))
-    user = cursor.fetchone()
-    conn.close()
-
-    if user and bcrypt.checkpw(password.encode(), user[2]):
-        return True, user[0], user[1]
+    db = get_db()
+    users = db["users"]
+    user = users.find_one({"email": email})
+    
+    if user and bcrypt.checkpw(password.encode(), user["password"]):
+        return True, str(user["_id"]), user["username"]
     return False, None, None
 
+# ================== CHAT SESSIONS ==================
 def create_new_session(user_id, session_name="New Chat"):
+    db = get_db()
+    sessions = db["chat_sessions"]
+    
     session_id = str(uuid.uuid4())
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO chat_sessions (user_id, session_id, session_name) VALUES (?, ?, ?)",
-        (user_id, session_id, session_name)
-    )
-    conn.commit()
-    conn.close()
+    sessions.insert_one({
+        "user_id": user_id,
+        "session_id": session_id,
+        "session_name": session_name,
+        "created_at": datetime.utcnow()
+    })
     return session_id
 
+def update_session_name_with_llm(session_id, first_message, llm):
+    db = get_db()
+    sessions = db["chat_sessions"]
+    session_name = generate_session_name(llm, first_message)
+    sessions.update_one({"session_id": session_id}, {"$set": {"session_name": session_name}})
+
+# ================== MESSAGES ==================
 def save_message(session_id, message_type, content):
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
+    db = get_db()
+    messages = db["chat_messages"]
     message_text = getattr(content, "content", str(content))
-    cursor.execute('''
-        INSERT INTO chat_messages (session_id, message_type, content)
-        VALUES (?, ?, ?)
-    ''', (session_id, message_type, message_text))
-    conn.commit()
-    conn.close()
+    messages.insert_one({
+        "session_id": session_id,
+        "message_type": message_type,
+        "content": message_text,
+        "timestamp": datetime.utcnow()
+    })
 
 def get_session_messages(session_id):
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT message_type, content, timestamp
-        FROM chat_messages
-        WHERE session_id = ?
-        ORDER BY timestamp ASC
-    ''', (session_id,))
-    messages = cursor.fetchall()
-    conn.close()
+    db = get_db()
+    messages = db["chat_messages"].find({"session_id": session_id}).sort("timestamp", 1)
     
-    if not messages:
-        return []
-    
-    return [{"role": "user" if m[0]=="user" else "assistant", "content": m[1]} for m in messages]
+    results = []
+    for m in messages:
+        results.append({
+            "role": "user" if m["message_type"] == "user" else "assistant",
+            "content": m["content"]
+        })
+    return results
 
 # ================== LLM WITH CONVERSATION MEMORY ==================
 system_prompt = """
@@ -133,7 +106,6 @@ You are Mindful AI, a compassionate and supportive mental health companion.
 - Remember the conversation context and refer to previous messages when relevant.
 """
 
-# Updated prompt template with conversation history
 prompt_template = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     MessagesPlaceholder(variable_name="chat_history"),
@@ -148,7 +120,6 @@ def initialize_llm():
     )
 
 def get_chat_history_for_llm(messages):
-    """Convert messages to LangChain message format for conversation context"""
     history = []
     for msg in messages:
         if msg["role"] == "user":
@@ -164,59 +135,34 @@ def generate_session_name(llm, first_message: str) -> str:
         response = llm.invoke(instruction)
         title = response.content.strip()
         return f"Chat about {title}"
-    except Exception as e:
+    except Exception:
         return "New Chat"
-
-def update_session_name_with_llm(session_id, first_message, llm):
-    session_name = generate_session_name(llm, first_message)
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE chat_sessions SET session_name = ? WHERE session_id = ?",
-        (session_name, session_id)
-    )
-    conn.commit()
-    conn.close()
 
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
-    """Process a suggestion button click"""
     st.session_state.messages.append({"role": "user", "content": suggestion_text})
     save_message(st.session_state.current_session_id, "user", suggestion_text)
-    
-    # Check if session name needs updating
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", 
-                  (st.session_state.current_session_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    current_name = result[0] if result and result[0] else "New Chat"
-    
+
+    db = get_db()
+    sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
+    current_name = sessions.get("session_name", "New Chat")
+
     if current_name == "New Chat":
-        update_session_name_with_llm(st.session_state.current_session_id, 
-                                     suggestion_text, st.session_state.llm)
-    
-    # Get conversation history for context
-    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])  # Exclude the current message
-    
-    # Get AI response with full conversation context
+        update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
+
+    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
     formatted = prompt_template.invoke({
         "chat_history": chat_history,
         "input": suggestion_text
     })
     assistant_reply = st.session_state.llm.invoke(formatted)
-    
+
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
-    
+
     st.session_state.show_suggestions = False
 
 # ================== STREAMLIT APP ==================
-init_database()
-
-# ===== LOGIN / REGISTER =====
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -255,7 +201,6 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
                 st.session_state.username = username
-                
                 new_session_id = create_new_session(user_id)
                 st.session_state.current_session_id = new_session_id
                 st.session_state.messages = [
@@ -277,7 +222,6 @@ if "show_suggestions" not in st.session_state:
 
 if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
-    
     if db_messages:
         st.session_state.messages = db_messages
         st.session_state.show_suggestions = False
@@ -315,46 +259,36 @@ with st.sidebar:
         st.session_state.show_suggestions = True
         st.rerun()
 
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_id, session_name FROM chat_sessions WHERE user_id=? ORDER BY created_at DESC", (st.session_state.user_id,))
-    sessions = cursor.fetchall()
-    conn.close()
+    db = get_db()
+    sessions = db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1)
 
     st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
 
-    for s_id, s_name in sessions:
-        msgs = get_session_messages(s_id)
-        
-        if len(msgs) == 0:
+    for s in sessions:
+        msgs = get_session_messages(s["session_id"])
+        if not msgs:
             continue
-        
-        display_name = s_name if s_name else "New Chat"
+
+        display_name = s.get("session_name", "New Chat")
 
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
-            if st.button(display_name, key=s_id):
-                st.session_state.current_session_id = s_id
+            if st.button(display_name, key=s["session_id"]):
+                st.session_state.current_session_id = s["session_id"]
                 st.session_state.messages = msgs
                 st.session_state.show_suggestions = False
                 st.rerun()
         with col2:
-            if st.button("🗑️", key=f"del-{s_id}"):
-                conn = sqlite3.connect('chat_history.db')
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM chat_messages WHERE session_id=?", (s_id,))
-                cursor.execute("DELETE FROM chat_sessions WHERE session_id=?", (s_id,))
-                conn.commit()
-                conn.close()
-                
-                if s_id == st.session_state.current_session_id:
+            if st.button("🗑️", key=f"del-{s['session_id']}"):
+                db["chat_messages"].delete_many({"session_id": s["session_id"]})
+                db["chat_sessions"].delete_one({"session_id": s["session_id"]})
+                if s["session_id"] == st.session_state.current_session_id:
                     new_session_id = create_new_session(st.session_state.user_id)
                     st.session_state.current_session_id = new_session_id
                     st.session_state.messages = [
                         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                     ]
                     st.session_state.show_suggestions = True
-                
                 st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -389,7 +323,6 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
     ]
     
     cols = st.columns(len(suggestions))
-    
     for idx, suggestion in enumerate(suggestions):
         with cols[idx]:
             if st.button(suggestion, key=f"suggestion_{idx}"):
@@ -403,21 +336,14 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.current_session_id, "user", prompt)
 
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
-    result = cursor.fetchone()
-    conn.close()
-
-    current_name = result[0] if result and result[0] else "New Chat"
+    db = get_db()
+    session = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
+    current_name = session.get("session_name", "New Chat") if session else "New Chat"
 
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, prompt, st.session_state.llm)
 
-    # Get conversation history (excluding the current user message)
     chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
-    
-    # Invoke LLM with full conversation context
     formatted = prompt_template.invoke({
         "chat_history": chat_history,
         "input": prompt
@@ -428,7 +354,6 @@ if prompt:
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
     
     st.session_state.show_suggestions = False
-
     st.rerun()
 
 # ================== CUSTOM CSS ==================
@@ -439,61 +364,31 @@ st.markdown("""
     overflow-y: auto;
     padding: 1rem 2rem;
 }
-
 .user-message {
     display: flex;
     justify-content: flex-end;
     margin-left: 2rem;
     margin-bottom: 1rem;
 }
-
 .user-message .markdown {
     background: #10a37f;
     color: white;
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 5px 20px;
     max-width: 70%;
-    border: none;
-    box-shadow: none;
 }
-
 .assistant-message {
     display: flex;
     justify-content: flex-start;
     margin-right: 2rem;
     margin-bottom: 1rem;
 }
-
 .assistant-message .markdown {
     background: #f5f5f5;
     color: #222;
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 20px 5px;
     max-width: 70%;
-    border: none;
-    box-shadow: none;
-}
-
-.stButton button {
-    border: none !important;
-    box-shadow: none !important;
-    outline: none !important;
-}
-
-.stButton button:focus {
-    border: none !important;
-    box-shadow: none !important;
-    outline: none !important;
-}
-
-.stButton button:hover {
-    border: none !important;
-    box-shadow: none !important;
-}
-
-.stButton button:active {
-    border: none !important;
-    box-shadow: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
