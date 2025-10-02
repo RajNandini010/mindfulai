@@ -2,77 +2,10 @@ import uuid
 import sqlite3
 from datetime import datetime
 import os
-import json
 import streamlit as st
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate
-from langchain.embeddings import HuggingFaceBgeEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain.document_loaders import PyPDFLoader
-import os
-from langchain_groq import ChatGroq
-
-groq_api_key = os.getenv("GROQ_API_KEY")
-llm = ChatGroq(model="llama-3.1-8b-instant", api_key=groq_api_key)
-
-
-
-# ================== CUSTOM CSS ==================
-st.markdown("""
-<style>
-.stChatInputContainer {
-    position: fixed !important;
-    bottom: 0 !important;
-    left: 0 !important;
-    width: 100vw !important;
-    z-index: 1001 !important;
-    background: #fff;
-    border-top: 1px solid #d1d5db;
-    padding: 1rem 2rem !important;
-    box-shadow: 0 -2px 12px rgba(0,0,0,0.06);
-}
-.block-container {
-    padding-bottom: 7rem !important;
-}
-.chat-messages {
-    max-height: calc(100vh - 10rem);
-    overflow-y: auto;
-    padding: 1rem 2rem;
-}
-.user-message {
-    display: flex;
-    justify-content: flex-end;
-    margin-left: 2rem;
-}
-.user-message .markdown {
-    background: #10a37f;
-    color: white;
-    padding: 1rem 1.25rem;
-    border-radius: 18px;
-    max-width: 70%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    word-wrap: break-word;
-}
-.assistant-message {
-    display: flex;
-    justify-content: flex-start;
-    margin-right: 2rem;
-}
-.assistant-message .markdown {
-    background: #ffffff;
-    color: #333333;
-    padding: 1rem 1.25rem;
-    border-radius: 18px;
-    max-width: 70%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    word-wrap: break-word;
-    border: 1px solid #e5e5e5;
-}
-</style>
-""", unsafe_allow_html=True)
-
 
 # ================== DATABASE ==================
 def init_database():
@@ -100,33 +33,28 @@ def init_database():
     conn.commit()
     conn.close()
 
+def create_new_session(user_id, session_name="New Chat"):
+    session_id = str(uuid.uuid4())
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO chat_sessions (user_id, session_id, session_name) VALUES (?, ?, ?)",
+        (user_id, session_id, session_name)
+    )
+    conn.commit()
+    conn.close()
+    return session_id
 
 def save_message(session_id, message_type, content):
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
-    message_text = getattr(content, "content", str(content))   # Sirf text save karega
+    message_text = getattr(content, "content", str(content))
     cursor.execute('''
         INSERT INTO chat_messages (session_id, message_type, content)
         VALUES (?, ?, ?)
     ''', (session_id, message_type, message_text))
     conn.commit()
     conn.close()
-
-
-def create_new_session(user_id, session_name=None):
-    session_id = str(uuid.uuid4())
-    if not session_name:
-        session_name = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO chat_sessions (user_id, session_id, session_name)
-        VALUES (?, ?, ?)
-    ''', (user_id, session_id, session_name))
-    conn.commit()
-    conn.close()
-    return session_id
-
 
 def get_session_messages(session_id):
     conn = sqlite3.connect('chat_history.db')
@@ -139,10 +67,9 @@ def get_session_messages(session_id):
     ''', (session_id,))
     messages = cursor.fetchall()
     conn.close()
-    return messages
+    return [{"role": "user" if m[0]=="user" else "assistant", "content": m[1]} for m in messages]
 
-
-# ================== LLM & PROMPT ==================
+# ================== LLM ==================
 system_prompt = """
 You are Mindful AI, a compassionate and supportive mental health companion.
 - Be empathetic, calm, and non-judgmental.
@@ -156,49 +83,37 @@ prompt_template = ChatPromptTemplate.from_messages([
     ("user", "{input}")
 ])
 
-
 def initialize_llm():
     return ChatGroq(
         temperature=0.3,
-        groq_api_key=os.getenv("GROQ_API_KEY", "api here"),
-        model_name="llama-3.3-70b-versatile"
+        groq_api_key=os.getenv("GROQ_API_KEY", "api_here"),
+        model_name="llama-3.1-8b-instant"
     )
 
+# ================== AUTO SESSION NAMING ==================
+def generate_session_name(llm, first_message: str) -> str:
+    instruction = f"Summarize this message into 3-4 words for a chat title:\n\n{first_message}"
+    response = llm.invoke(instruction)
+    title = response.content.strip()
+    return f"Chat about {title}"
 
-# ================== RAG (Knowledge Base) ==================
-def init_vector_db():
-    embeddings = HuggingFaceBgeEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+def update_session_name_with_llm(session_id, first_message, llm):
+    session_name = generate_session_name(llm, first_message)
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE chat_sessions SET session_name = ? WHERE session_id = ?",
+        (session_name, session_id)
     )
-    vectordb = Chroma(
-        persist_directory="db",
-        embedding_function=embeddings
-    )
-    return vectordb
-
-
-def build_qa_chain(llm, vectordb):
-    return RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vectordb.as_retriever(),
-        chain_type="stuff"
-    )
-
-
-def load_pdf_to_db(filepath):
-    loader = PyPDFLoader(filepath)
-    docs = loader.load()
-    vectordb = init_vector_db()
-    vectordb.add_documents(docs)
-    return vectordb
-
+    conn.commit()
+    conn.close()
 
 # ================== STREAMLIT APP ==================
 init_database()
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate mental health support companion. How can I support you today?"}
+        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
     ]
 
 if "user_id" not in st.session_state:
@@ -210,8 +125,24 @@ if "current_session_id" not in st.session_state:
 if "llm" not in st.session_state:
     st.session_state.llm = initialize_llm()
 
+# ========== SIDEBAR ==========
+with st.sidebar:
+    st.title("💬 Mindful AI")
+    st.write("Your conversations")
+    
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_id, session_name FROM chat_sessions ORDER BY created_at DESC")
+    sessions = cursor.fetchall()
+    conn.close()
 
-# Chat UI
+    for s_id, s_name in sessions:
+        if st.button(s_name, key=s_id):
+            st.session_state.current_session_id = s_id
+            st.session_state.messages = get_session_messages(s_id)
+            st.rerun()
+
+# ========== CHAT UI ==========
 chat_container = st.container()
 with chat_container:
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
@@ -222,25 +153,65 @@ with chat_container:
             st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-
-# User Input
-prompt = st.chat_input("Type your message here...", key="static_chat_input")
+# ========== USER INPUT ==========
+prompt = st.chat_input("Type your message here...")
 
 if prompt:
+    # save user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.current_session_id, "user", prompt)
 
-    # Default LLM reply with system prompt
+    # update session name if it's still "New Chat"
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
+    current_name = cursor.fetchone()[0]
+    conn.close()
+
+    if current_name == "New Chat":
+        update_session_name_with_llm(st.session_state.current_session_id, prompt, st.session_state.llm)
+
+    # assistant reply
     formatted = prompt_template.format_messages(input=prompt)
     assistant_reply = st.session_state.llm.invoke(formatted)
 
-    # OPTIONAL: If you want knowledge base answers
-    vectordb = init_vector_db()
-    qa_chain = build_qa_chain(st.session_state.llm, vectordb)
-    assistant_reply = qa_chain.run(prompt)
-
-    st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
-    save_message(st.session_state.current_session_id, "assistant", assistant_reply)
+    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
+    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
 
     st.rerun()
 
+# ================== CUSTOM CSS ==================
+st.markdown("""
+<style>
+.chat-messages {
+    max-height: calc(100vh - 10rem);
+    overflow-y: auto;
+    padding: 1rem 2rem;
+}
+.user-message {
+    display: flex;
+    justify-content: flex-end;
+    margin-left: 2rem;
+}
+.user-message .markdown {
+    background: #10a37f;
+    color: white;
+    padding: 0.8rem 1.2rem;
+    border-radius: 20px 20px 5px 20px;
+    max-width: 70%;
+}
+.assistant-message {
+    display: flex;
+    justify-content: flex-start;
+    margin-right: 2rem;
+}
+.assistant-message .markdown {
+    background: #f5f5f5;
+    color: #222;
+    padding: 0.8rem 1.2rem;
+    border-radius: 20px 20px 20px 5px;
+    max-width: 70%;
+    border: 1px solid #ddd;
+}
+</style>
+""", unsafe_allow_html=True)
