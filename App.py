@@ -66,9 +66,8 @@ def login_user(username, password):
     user = cursor.fetchone()
     conn.close()
 
-    # Check if user exists before accessing elements
     if user and bcrypt.checkpw(password.encode(), user[1]):
-        return True, user[0]  # Return True and user ID
+        return True, user[0]
     return False, None
 
 def create_new_session(user_id, session_name="New Chat"):
@@ -106,7 +105,6 @@ def get_session_messages(session_id):
     messages = cursor.fetchall()
     conn.close()
     
-    # Return empty list if no messages, not None
     if not messages:
         return []
     
@@ -231,23 +229,17 @@ with st.sidebar:
     for s_id, s_name in sessions:
         msgs = get_session_messages(s_id)
         
-        # Display name
+        # Skip empty sessions
+        if len(msgs) == 0:
+            continue
+        
         display_name = s_name if s_name else "New Chat"
-        if display_name == "New Chat" and len(msgs) == 0:
-            display_name = "🆕 New Chat"
 
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
             if st.button(display_name, key=s_id):
                 st.session_state.current_session_id = s_id
-                # Load messages or use default if empty
-                loaded_msgs = get_session_messages(s_id)
-                if loaded_msgs:
-                    st.session_state.messages = loaded_msgs
-                else:
-                    st.session_state.messages = [
-                        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
-                    ]
+                st.session_state.messages = msgs
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s_id}"):
@@ -258,7 +250,6 @@ with st.sidebar:
                 conn.commit()
                 conn.close()
                 
-                # If deleted current session, create new one
                 if s_id == st.session_state.current_session_id:
                     st.session_state.current_session_id = create_new_session(st.session_state.user_id)
                     st.session_state.messages = [
@@ -270,7 +261,6 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("🚪 Logout"):
-        # Clear all session state
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.session_state.logged_in = False
@@ -294,14 +284,12 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.current_session_id, "user", prompt)
 
-    # Check session name with None handling
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
     cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
     result = cursor.fetchone()
     conn.close()
 
-    # Safe access to session name
     current_name = result[0] if result and result[0] else "New Chat"
 
     if current_name == "New Chat":
@@ -318,35 +306,68 @@ if prompt:
 # ================== CUSTOM CSS ==================
 st.markdown("""
 <style>
+/* Remove borders and styling from chat messages */
 .chat-messages {
     max-height: calc(100vh - 10rem);
     overflow-y: auto;
     padding: 1rem 2rem;
 }
+
 .user-message {
     display: flex;
     justify-content: flex-end;
     margin-left: 2rem;
+    margin-bottom: 1rem;
 }
+
 .user-message .markdown {
     background: #10a37f;
     color: white;
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 5px 20px;
     max-width: 70%;
+    border: none;  /* Remove border */
+    box-shadow: none;  /* Remove shadow */
 }
+
 .assistant-message {
     display: flex;
     justify-content: flex-start;
     margin-right: 2rem;
+    margin-bottom: 1rem;
 }
+
 .assistant-message .markdown {
     background: #f5f5f5;
     color: #222;
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 20px 5px;
     max-width: 70%;
-    border: 1px solid #ddd;
+    border: none;  /* Remove border */
+    box-shadow: none;  /* Remove shadow */
+}
+
+/* Remove borders from sidebar buttons */
+.stButton button {
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
+
+.stButton button:focus {
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
+
+.stButton button:hover {
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.stButton button:active {
+    border: none !important;
+    box-shadow: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
