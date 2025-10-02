@@ -2,6 +2,7 @@ import uuid
 import sqlite3
 from datetime import datetime
 import os
+import bcrypt
 import streamlit as st
 
 from langchain_groq import ChatGroq
@@ -11,15 +12,27 @@ from langchain.prompts import ChatPromptTemplate
 def init_database():
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
+
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_sessions (
+        CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            session_id TEXT,
-            session_name TEXT,
+            username TEXT UNIQUE,
+            password TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            session_id TEXT,
+            session_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,11 +40,35 @@ def init_database():
             message_type TEXT,
             content TEXT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES chat_sessions (session_id)
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id)
         )
     ''')
     conn.commit()
     conn.close()
+
+def register_user(username, password):
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+    try:
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_pw))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False, "Username already exists"
+    conn.close()
+    return True, "Registration successful"
+
+def login_user(username, password):
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, password FROM users WHERE username=?", (username,))
+    user = cursor.fetchone()
+    conn.close()
+
+    if user and bcrypt.checkpw(password.encode(), user[1]):
+        return True, user[0]  # Return True and user ID
+    return False, None
 
 def create_new_session(user_id, session_name="New Chat"):
     session_id = str(uuid.uuid4())
@@ -111,13 +148,37 @@ def update_session_name_with_llm(session_id, first_message, llm):
 # ================== STREAMLIT APP ==================
 init_database()
 
+# ===== LOGIN / REGISTER =====
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    st.title("🔒 Login or Register")
+
+    option = st.radio("Choose action", ("Login", "Register"))
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button(option):
+        if option == "Register":
+            success, msg = register_user(username, password)
+            st.success(msg) if success else st.error(msg)
+        else:
+            success, user_id = login_user(username, password)
+            if success:
+                st.session_state.logged_in = True
+                st.session_state.user_id = user_id
+                st.session_state.current_session_id = create_new_session(user_id)
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+    st.stop()
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
     ]
-
-if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())[:16]
 
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = create_new_session(st.session_state.user_id)
@@ -125,7 +186,6 @@ if "current_session_id" not in st.session_state:
 if "llm" not in st.session_state:
     st.session_state.llm = initialize_llm()
 
-# ========== SIDEBAR ==========
 # ========== SIDEBAR ==========
 with st.sidebar:
     st.title("💬 Mindful AI")
@@ -140,14 +200,13 @@ with st.sidebar:
 
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT session_id, session_name FROM chat_sessions ORDER BY created_at DESC")
+    cursor.execute("SELECT session_id, session_name FROM chat_sessions WHERE user_id=? ORDER BY created_at DESC", (st.session_state.user_id,))
     sessions = cursor.fetchall()
     conn.close()
 
     st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
 
     for s_id, s_name in sessions:
-        # Agar naam abhi bhi default hai aur koi message nahi bheja gaya
         msgs = get_session_messages(s_id)
         if s_name == "New Chat" and len(msgs) == 0:
             s_name = "🆕 New Chat"
@@ -170,7 +229,9 @@ with st.sidebar:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.experimental_rerun()
 
 # ========== CHAT UI ==========
 chat_container = st.container()
@@ -187,11 +248,9 @@ with chat_container:
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
-    # save user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.current_session_id, "user", prompt)
 
-    # update session name if it's still "New Chat"
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
     cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
@@ -201,7 +260,6 @@ if prompt:
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, prompt, st.session_state.llm)
 
-    # assistant reply
     formatted = prompt_template.format_messages(input=prompt)
     assistant_reply = st.session_state.llm.invoke(formatted)
 
@@ -245,5 +303,3 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
-
