@@ -6,4 +6,7 @@ chromadb
 sentence-transformers
 pypdf
 langchain_community
+pymongo[srv]
+dnspython
+
 
