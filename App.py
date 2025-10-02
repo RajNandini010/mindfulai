@@ -23,7 +23,6 @@ def get_db():
     client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
     return client["chat_app"]
 
-
 # ================== USERS ==================
 def register_user(username, email, password):
     if not is_valid_email(email):
@@ -121,10 +120,6 @@ def load_llm():
         model_name="llama-3.1-8b-instant"
     )
 
-if "llm" not in st.session_state:
-    st.session_state.llm = load_llm()
-
-
 def get_chat_history_for_llm(messages):
     history = []
     for msg in messages:
@@ -133,6 +128,35 @@ def get_chat_history_for_llm(messages):
         elif msg["role"] == "assistant":
             history.append(AIMessage(content=msg["content"]))
     return history
+
+# ================== GENERATE RELATED QUESTIONS ==================
+def get_related_questions(llm, messages):
+    """Generate 3-5 related follow-up questions based on conversation"""
+    try:
+        question_prompt = """Based on our conversation, suggest 4 short, natural follow-up questions the user might want to ask. 
+Make them helpful and relevant. Format as a simple numbered list (1., 2., 3., 4.)."""
+        
+        history = get_chat_history_for_llm(messages)
+        formatted = prompt_template.invoke({
+            "chat_history": history,
+            "input": question_prompt
+        })
+        response = llm.invoke(formatted)
+        
+        # Parse numbered questions
+        questions = []
+        for line in response.content.split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith('-')):
+                # Remove numbering
+                question = re.sub(r'^\d+[\.\)]\s*', '', line)
+                question = re.sub(r'^-\s*', '', question)
+                if question:
+                    questions.append(question)
+        
+        return questions[:5]
+    except:
+        return ["Tell me more", "What else?", "How can I apply this?"]
 
 # ================== AUTO SESSION NAMING ==================
 def generate_session_name(llm, first_message: str) -> str:
@@ -146,23 +170,12 @@ def generate_session_name(llm, first_message: str) -> str:
 
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
-    response_text = assistant_reply.content
-    words = response_text.split()
-
-    typed_text = ""
-    placeholder = st.empty()
-
-    for word in words:
-        typed_text += word + " "
-        placeholder.markdown(f'<div class="assistant-message"><div class="markdown">{typed_text}</div></div>', unsafe_allow_html=True)
-        time.sleep(0.05)  # adjust speed
-
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
-    save_message(st.session_state.current_session_id, "assistant", response_text)
+    st.session_state.messages.append({"role": "user", "content": suggestion_text})
+    save_message(st.session_state.current_session_id, "user", suggestion_text)
 
     db = get_db()
     sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
-    current_name = sessions.get("session_name", "New Chat")
+    current_name = sessions.get("session_name", "New Chat") if sessions else "New Chat"
 
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
@@ -177,7 +190,7 @@ def handle_suggestion(suggestion_text):
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
 
-    st.session_state.show_suggestions = False
+    st.session_state.show_suggestions = True
 
 # ================== STREAMLIT APP ==================
 if "logged_in" not in st.session_state:
@@ -232,7 +245,7 @@ if not st.session_state.logged_in:
 
 # ========== INITIALIZE SESSION STATE ==========
 if "llm" not in st.session_state:
-    st.session_state.llm = initialize_llm()
+    st.session_state.llm = load_llm()
 
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
@@ -241,7 +254,7 @@ if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
     if db_messages:
         st.session_state.messages = db_messages
-        st.session_state.show_suggestions = False
+        st.session_state.show_suggestions = True
     elif "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
@@ -277,13 +290,13 @@ with st.sidebar:
         st.rerun()
 
     db = get_db()
-    sessions = db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1)
+    sessions = list(db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1).limit(15))
 
     st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
 
     for s in sessions:
-        msgs = get_session_messages(s["session_id"])
-        if not msgs:
+        msg_count = db["chat_messages"].count_documents({"session_id": s["session_id"]}, limit=1)
+        if msg_count == 0:
             continue
 
         display_name = s.get("session_name", "New Chat")
@@ -292,8 +305,8 @@ with st.sidebar:
         with col1:
             if st.button(display_name, key=s["session_id"]):
                 st.session_state.current_session_id = s["session_id"]
-                st.session_state.messages = msgs
-                st.session_state.show_suggestions = False
+                st.session_state.messages = get_session_messages(s["session_id"])
+                st.session_state.show_suggestions = True
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s['session_id']}"):
@@ -328,21 +341,28 @@ with chat_container:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== SUGGESTION BUTTONS ==========
-if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
-    st.markdown("### 💡 Try asking about:")
-    
-    suggestions = [
-        "😰 I'm feeling anxious today",
-        "😔 How to cope with stress?",
-        "🧘 Mindfulness exercises",
-        "💤 Tips for better sleep",
-        "🎯 Setting healthy goals"
-    ]
+if st.session_state.show_suggestions:
+    # Show initial suggestions for new chats
+    if len(st.session_state.messages) <= 1:
+        st.markdown("### 💡 Try asking about:")
+        
+        suggestions = [
+            "😰 I'm feeling anxious today",
+            "😔 How to cope with stress?",
+            "🧘 Mindfulness exercises",
+            "💤 Tips for better sleep",
+            "🎯 Setting healthy goals"
+        ]
+    else:
+        # Generate dynamic related questions for ongoing conversations
+        st.markdown("### 🔗 Related:")
+        suggestions = get_related_questions(st.session_state.llm, st.session_state.messages)
     
     cols = st.columns(len(suggestions))
     for idx, suggestion in enumerate(suggestions):
         with cols[idx]:
-            if st.button(suggestion, key=f"suggestion_{idx}"):
+            # Use message count in key to avoid duplicate keys
+            if st.button(suggestion, key=f"suggestion_{idx}_{len(st.session_state.messages)}"):
                 handle_suggestion(suggestion)
                 st.rerun()
 
@@ -370,7 +390,7 @@ if prompt:
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
     
-    st.session_state.show_suggestions = False
+    st.session_state.show_suggestions = True
     st.rerun()
 
 # ================== CUSTOM CSS ==================
@@ -409,5 +429,3 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
-
