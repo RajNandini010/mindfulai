@@ -104,8 +104,6 @@ You are Mindful AI, a compassionate and supportive mental health companion.
 - Give short, practical, and encouraging advice.
 - If user asks technical/programming, answer step by step with clarity.
 - If user asks personal/emotional, focus on positivity and support.
--Suggest 3 possible next questions.
-
 - Remember the conversation context and refer to previous messages when relevant.
 """
 
@@ -411,4 +409,5 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
 
