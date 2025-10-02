@@ -5,6 +5,7 @@ import bcrypt
 import streamlit as st
 from datetime import datetime
 from pymongo import MongoClient
+import time
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -142,26 +143,7 @@ def generate_session_name(llm, first_message: str) -> str:
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
     st.session_state.messages.append({"role": "user", "content": suggestion_text})
-    save_message(st.session_state.current_session_id, "user", suggestion_text)
-
-    db = get_db()
-    sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
-    current_name = sessions.get("session_name", "New Chat") if sessions else "New Chat"
-
-    if current_name == "New Chat":
-        update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
-
-    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
-    formatted = prompt_template.invoke({
-        "chat_history": chat_history,
-        "input": suggestion_text
-    })
-    assistant_reply = st.session_state.llm.invoke(formatted)
-
-    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
-    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
-
-    st.session_state.show_suggestions = False
+    st.session_state.awaiting_response = True
 
 # ================== STREAMLIT APP ==================
 if "logged_in" not in st.session_state:
@@ -221,6 +203,9 @@ if "llm" not in st.session_state:
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
 
+if "awaiting_response" not in st.session_state:
+    st.session_state.awaiting_response = False
+
 if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
     if db_messages:
@@ -247,7 +232,7 @@ with st.sidebar:
     st.title("💬 Mindful AI")
     
     if "username" in st.session_state:
-        st.markdown(f"### 👤 {st.session_state.username}")
+        st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
     
     st.write("Your conversations")
 
@@ -268,7 +253,7 @@ with st.sidebar:
         if msg_count == 0:
             continue
 
-        display_name = s.get("session_name", "New Chat")[:40]
+        display_name = s.get("session_name", "New Chat")
 
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
@@ -296,10 +281,24 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.rerun()
 
-# ========== CHAT UI WITH STREAMING ==========
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# ========== CHAT UI ==========
+chat_container = st.container()
+with chat_container:
+    st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
+    for idx, message in enumerate(st.session_state.messages):
+        if message["role"] == "user":
+            st.markdown(f'<div class="user-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# If awaiting response, show streaming placeholder
+if st.session_state.awaiting_response:
+    streaming_placeholder = st.empty()
+    with streaming_placeholder.container():
+        st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
+        st.markdown('<div class="assistant-message"><div class="markdown" id="streaming-text"></div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== SUGGESTION BUTTONS ==========
 if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
@@ -308,7 +307,9 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
     suggestions = [
         "😰 I'm feeling anxious today",
         "😔 How to cope with stress?",
-        "🧘 Mindfulness exercises"
+        "🧘 Mindfulness exercises",
+        "💤 Tips for better sleep",
+        "🎯 Setting healthy goals"
     ]
     
     cols = st.columns(len(suggestions))
@@ -318,15 +319,11 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
                 handle_suggestion(suggestion)
                 st.rerun()
 
-# ========== USER INPUT WITH STREAMING ==========
+# ========== USER INPUT ==========
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
-    # Display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
     save_message(st.session_state.current_session_id, "user", prompt)
 
     db = get_db()
@@ -342,21 +339,50 @@ if prompt:
         "input": prompt
     })
     
-    # Stream the assistant response
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
-        
-        # Stream response from LLM
-        for chunk in st.session_state.llm.stream(formatted):
-            full_response += chunk.content
-            message_placeholder.markdown(full_response + "▌")
-        
-        message_placeholder.markdown(full_response)
-    
-    # Save complete response
+    # Stream response
+    full_response = ""
+    for chunk in st.session_state.llm.stream(formatted):
+        full_response += chunk.content
+
     st.session_state.messages.append({"role": "assistant", "content": full_response})
     save_message(st.session_state.current_session_id, "assistant", full_response)
     
     st.session_state.show_suggestions = False
     st.rerun()
+
+# ================== CUSTOM CSS ==================
+st.markdown("""
+<style>
+.chat-messages {
+    max-height: calc(100vh - 15rem);
+    overflow-y: auto;
+    padding: 1rem 2rem;
+}
+.user-message {
+    display: flex;
+    justify-content: flex-end;
+    margin-left: 2rem;
+    margin-bottom: 1rem;
+}
+.user-message .markdown {
+    background: #10a37f;
+    color: white;
+    padding: 0.8rem 1.2rem;
+    border-radius: 20px 20px 5px 20px;
+    max-width: 70%;
+}
+.assistant-message {
+    display: flex;
+    justify-content: flex-start;
+    margin-right: 2rem;
+    margin-bottom: 1rem;
+}
+.assistant-message .markdown {
+    background: #f5f5f5;
+    color: #222;
+    padding: 0.8rem 1.2rem;
+    border-radius: 20px 20px 20px 5px;
+    max-width: 70%;
+}
+</style>
+""", unsafe_allow_html=True)
