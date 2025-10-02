@@ -5,7 +5,6 @@ import bcrypt
 import streamlit as st
 from datetime import datetime
 from pymongo import MongoClient
-import time
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -23,6 +22,7 @@ def get_db():
     mongo_uri = st.secrets["MONGO_URI"]
     client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
     return client["chat_app"]
+
 
 # ================== USERS ==================
 def register_user(username, email, password):
@@ -121,6 +121,10 @@ def load_llm():
         model_name="llama-3.1-8b-instant"
     )
 
+if "llm" not in st.session_state:
+    st.session_state.llm = load_llm()
+
+
 def get_chat_history_for_llm(messages):
     history = []
     for msg in messages:
@@ -143,7 +147,26 @@ def generate_session_name(llm, first_message: str) -> str:
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
     st.session_state.messages.append({"role": "user", "content": suggestion_text})
-    st.session_state.awaiting_response = True
+    save_message(st.session_state.current_session_id, "user", suggestion_text)
+
+    db = get_db()
+    sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
+    current_name = sessions.get("session_name", "New Chat")
+
+    if current_name == "New Chat":
+        update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
+
+    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
+    formatted = prompt_template.invoke({
+        "chat_history": chat_history,
+        "input": suggestion_text
+    })
+    assistant_reply = st.session_state.llm.invoke(formatted)
+
+    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
+    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
+
+    st.session_state.show_suggestions = False
 
 # ================== STREAMLIT APP ==================
 if "logged_in" not in st.session_state:
@@ -198,13 +221,10 @@ if not st.session_state.logged_in:
 
 # ========== INITIALIZE SESSION STATE ==========
 if "llm" not in st.session_state:
-    st.session_state.llm = load_llm()
+    st.session_state.llm = initialize_llm()
 
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
-
-if "awaiting_response" not in st.session_state:
-    st.session_state.awaiting_response = False
 
 if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
@@ -246,11 +266,13 @@ with st.sidebar:
         st.rerun()
 
     db = get_db()
-    sessions = list(db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1).limit(15))
+    sessions = db["chat_sessions"].find({"user_id": st.session_state.user_id}).sort("created_at", -1)
+
+    st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
 
     for s in sessions:
-        msg_count = db["chat_messages"].count_documents({"session_id": s["session_id"]}, limit=1)
-        if msg_count == 0:
+        msgs = get_session_messages(s["session_id"])
+        if not msgs:
             continue
 
         display_name = s.get("session_name", "New Chat")
@@ -259,7 +281,7 @@ with st.sidebar:
         with col1:
             if st.button(display_name, key=s["session_id"]):
                 st.session_state.current_session_id = s["session_id"]
-                st.session_state.messages = get_session_messages(s["session_id"])
+                st.session_state.messages = msgs
                 st.session_state.show_suggestions = False
                 st.rerun()
         with col2:
@@ -275,6 +297,8 @@ with st.sidebar:
                     st.session_state.show_suggestions = True
                 st.rerun()
 
+    st.markdown("</div>", unsafe_allow_html=True)
+
     if st.button("🚪 Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
@@ -285,20 +309,12 @@ with st.sidebar:
 chat_container = st.container()
 with chat_container:
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
-    for idx, message in enumerate(st.session_state.messages):
+    for message in st.session_state.messages:
         if message["role"] == "user":
             st.markdown(f'<div class="user-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
-
-# If awaiting response, show streaming placeholder
-if st.session_state.awaiting_response:
-    streaming_placeholder = st.empty()
-    with streaming_placeholder.container():
-        st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
-        st.markdown('<div class="assistant-message"><div class="markdown" id="streaming-text"></div></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== SUGGESTION BUTTONS ==========
 if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
@@ -338,14 +354,10 @@ if prompt:
         "chat_history": chat_history,
         "input": prompt
     })
-    
-    # Stream response
-    full_response = ""
-    for chunk in st.session_state.llm.stream(formatted):
-        full_response += chunk.content
+    assistant_reply = st.session_state.llm.invoke(formatted)
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
-    save_message(st.session_state.current_session_id, "assistant", full_response)
+    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
+    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
     
     st.session_state.show_suggestions = False
     st.rerun()
