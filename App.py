@@ -175,7 +175,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
                 st.session_state.current_session_id = create_new_session(user_id)
-                st.experimental_rerun()
+                st.rerun() # Formerly st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
     st.stop()
@@ -236,7 +236,7 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         st.session_state.logged_in = False
-        st.experimental_rerun()
+        st.rerun() # Formerly st.experimental_rerun()
 
 # ========== CHAT UI ==========
 chat_container = st.container()
