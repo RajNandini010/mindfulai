@@ -136,7 +136,8 @@ def get_related_questions(llm, messages):
         question_prompt = """Based on our conversation, suggest 4 short, natural follow-up questions the user might want to ask. 
 Make them helpful and relevant. Format as a simple numbered list (1., 2., 3., 4.)."""
         
-        history = get_chat_history_for_llm(messages)
+        history = get_chat_history_for_llm(st.session_state.messages[-10:])
+
         formatted = prompt_template.invoke({
             "chat_history": history,
             "input": question_prompt
@@ -429,3 +430,4 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
