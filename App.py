@@ -126,21 +126,49 @@ if "llm" not in st.session_state:
     st.session_state.llm = initialize_llm()
 
 # ========== SIDEBAR ==========
+# ========== SIDEBAR ==========
 with st.sidebar:
     st.title("💬 Mindful AI")
     st.write("Your conversations")
-    
+
+    # ➕ New Chat button
+    if st.button("➕ New Chat"):
+        st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+        st.session_state.messages = [
+            {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+        ]
+        st.rerun()
+
+    # Fetch all sessions
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
     cursor.execute("SELECT session_id, session_name FROM chat_sessions ORDER BY created_at DESC")
     sessions = cursor.fetchall()
     conn.close()
 
+    # Sidebar scrollable session list
+    st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
+
     for s_id, s_name in sessions:
-        if st.button(s_name, key=s_id):
-            st.session_state.current_session_id = s_id
-            st.session_state.messages = get_session_messages(s_id)
-            st.rerun()
+        col1, col2 = st.columns([0.8, 0.2])
+        with col1:
+            if st.button(s_name, key=s_id):
+                st.session_state.current_session_id = s_id
+                st.session_state.messages = get_session_messages(s_id)
+                st.rerun()
+        with col2:
+            if st.button("🗑️", key=f"del-{s_id}"):
+                # delete session + its messages
+                conn = sqlite3.connect('chat_history.db')
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM chat_messages WHERE session_id=?", (s_id,))
+                cursor.execute("DELETE FROM chat_sessions WHERE session_id=?", (s_id,))
+                conn.commit()
+                conn.close()
+                st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ========== CHAT UI ==========
 chat_container = st.container()
@@ -215,3 +243,4 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
