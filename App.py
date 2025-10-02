@@ -8,11 +8,10 @@ import streamlit as st
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 # ================== EMAIL VALIDATION ==================
 def is_valid_email(email):
-    """Validate email format using regex"""
     pattern = r'^[\w\.-]+@[a-zA-Z\d-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
@@ -123,7 +122,7 @@ def get_session_messages(session_id):
     
     return [{"role": "user" if m[0]=="user" else "assistant", "content": m[1]} for m in messages]
 
-# ================== LLM WITH CONVERSATION MEMORY ==================
+# ================== LLM AND PROMPT ==================
 system_prompt = """
 You are Mindful AI, a compassionate and supportive mental health companion.
 - Be empathetic, calm, and non-judgmental.
@@ -133,7 +132,6 @@ You are Mindful AI, a compassionate and supportive mental health companion.
 - Remember the conversation context and refer to previous messages when relevant.
 """
 
-# Updated prompt template with conversation history
 prompt_template = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     MessagesPlaceholder(variable_name="chat_history"),
@@ -148,7 +146,6 @@ def initialize_llm():
     )
 
 def get_chat_history_for_llm(messages):
-    """Convert messages to LangChain message format for conversation context"""
     history = []
     for msg in messages:
         if msg["role"] == "user":
@@ -157,51 +154,37 @@ def get_chat_history_for_llm(messages):
             history.append(AIMessage(content=msg["content"]))
     return history
 
-# ================== AUTO SESSION NAMING ==================
-def generate_session_name(llm, first_message: str) -> str:
-    try:
-        instruction = f"Summarize this message into 3-4 words for a chat title:\n\n{first_message}"
-        response = llm.invoke(instruction)
-        title = response.content.strip()
-        return f"Chat about {title}"
-    except Exception as e:
-        return "New Chat"
-
-def update_session_name_with_llm(session_id, first_message, llm):
-    session_name = generate_session_name(llm, first_message)
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE chat_sessions SET session_name = ? WHERE session_id = ?",
-        (session_name, session_id)
+# ================== SUGGESTION GENERATION ==================
+def get_dynamic_suggestions(llm, messages):
+    suggestion_prompt = (
+        "Based on our conversation so far, suggest 3 short helpful questions or topics "
+        "the user can ask next, separated by | symbol."
     )
-    conn.commit()
-    conn.close()
+    history = get_chat_history_for_llm(messages)
+    formatted = prompt_template.invoke({
+        "chat_history": history,
+        "input": suggestion_prompt
+    })
+    response = llm.invoke(formatted)
+    suggestions = [s.strip() for s in response.content.split('|') if s.strip()]
+    return suggestions[:5]
 
 # ================== HANDLE SUGGESTION CLICK ==================
 def handle_suggestion(suggestion_text):
-    """Process a suggestion button click"""
     st.session_state.messages.append({"role": "user", "content": suggestion_text})
     save_message(st.session_state.current_session_id, "user", suggestion_text)
-    
-    # Check if session name needs updating
+
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", 
-                  (st.session_state.current_session_id,))
+    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
     result = cursor.fetchone()
     conn.close()
-    
+
     current_name = result[0] if result and result[0] else "New Chat"
-    
     if current_name == "New Chat":
-        update_session_name_with_llm(st.session_state.current_session_id, 
-                                     suggestion_text, st.session_state.llm)
+        update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
     
-    # Get conversation history for context
-    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])  # Exclude the current message
-    
-    # Get AI response with full conversation context
+    chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
     formatted = prompt_template.invoke({
         "chat_history": chat_history,
         "input": suggestion_text
@@ -210,26 +193,25 @@ def handle_suggestion(suggestion_text):
     
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
-    
     st.session_state.show_suggestions = False
 
 # ================== STREAMLIT APP ==================
 init_database()
 
-# ===== LOGIN / REGISTER =====
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
+if "show_suggestions" not in st.session_state:
+    st.session_state.show_suggestions = True
 
+# --- Login/Register UI
 if not st.session_state.logged_in:
     st.title("🔒 Login or Register")
-
     option = st.radio("Choose action", ("Login", "Register"))
-
+    
     if option == "Register":
         username = st.text_input("Username")
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        
         if st.button("Register"):
             if not username:
                 st.error("Please enter a username")
@@ -244,18 +226,17 @@ if not st.session_state.logged_in:
                     st.info("Please login with your credentials")
                 else:
                     st.error(msg)
-    
-    else:  # Login
+        st.stop()
+
+    else:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        
         if st.button("Login"):
             success, user_id, username = login_user(email, password)
             if success:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
                 st.session_state.username = username
-                
                 new_session_id = create_new_session(user_id)
                 st.session_state.current_session_id = new_session_id
                 st.session_state.messages = [
@@ -265,19 +246,15 @@ if not st.session_state.logged_in:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    
-    st.stop()
+        st.stop()
 
-# ========== INITIALIZE SESSION STATE ==========
+# --- Initialize LLM
 if "llm" not in st.session_state:
     st.session_state.llm = initialize_llm()
 
-if "show_suggestions" not in st.session_state:
-    st.session_state.show_suggestions = True
-
+# --- Load conversation messages for current session
 if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
-    
     if db_messages:
         st.session_state.messages = db_messages
         st.session_state.show_suggestions = False
@@ -297,13 +274,11 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-# ========== SIDEBAR ==========
+# --- Sidebar with username and sessions
 with st.sidebar:
     st.title("💬 Mindful AI")
-    
     if "username" in st.session_state:
         st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
-    
     st.write("Your conversations")
 
     if st.button("➕ New Chat"):
@@ -322,15 +297,11 @@ with st.sidebar:
     conn.close()
 
     st.markdown("<div style='max-height:300px;overflow-y:auto;padding-right:8px;'>", unsafe_allow_html=True)
-
     for s_id, s_name in sessions:
         msgs = get_session_messages(s_id)
-        
         if len(msgs) == 0:
             continue
-        
         display_name = s_name if s_name else "New Chat"
-
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
             if st.button(display_name, key=s_id):
@@ -346,7 +317,6 @@ with st.sidebar:
                 cursor.execute("DELETE FROM chat_sessions WHERE session_id=?", (s_id,))
                 conn.commit()
                 conn.close()
-                
                 if s_id == st.session_state.current_session_id:
                     new_session_id = create_new_session(st.session_state.user_id)
                     st.session_state.current_session_id = new_session_id
@@ -354,7 +324,6 @@ with st.sidebar:
                         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                     ]
                     st.session_state.show_suggestions = True
-                
                 st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -365,7 +334,7 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.rerun()
 
-# ========== CHAT UI ==========
+# --- Display chat messages
 chat_container = st.container()
 with chat_container:
     st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
@@ -376,27 +345,22 @@ with chat_container:
             st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== SUGGESTION BUTTONS ==========
-if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
-    st.markdown("### 💡 Try asking about:")
-    
-    suggestions = [
-        "😰 I'm feeling anxious today",
-        "😔 How to cope with stress?",
-        "🧘 Mindfulness exercises",
-        "💤 Tips for better sleep",
-        "🎯 Setting healthy goals"
-    ]
-    
-    cols = st.columns(len(suggestions))
-    
-    for idx, suggestion in enumerate(suggestions):
-        with cols[idx]:
-            if st.button(suggestion, key=f"suggestion_{idx}"):
-                handle_suggestion(suggestion)
-                st.rerun()
+# --- Dynamic suggestions after each bot response
+if st.session_state.show_suggestions:
+    dynamic_suggestions = get_dynamic_suggestions(st.session_state.llm, st.session_state.messages)
 
-# ========== USER INPUT ==========
+    if dynamic_suggestions:
+        st.markdown("### 💡 You could also ask:")
+        cols = st.columns(len(dynamic_suggestions))
+        for idx, suggestion in enumerate(dynamic_suggestions):
+            with cols[idx]:
+                if st.button(suggestion, key=f"dyn_suggestion_{idx}"):
+                    st.session_state.messages.append({"role": "user", "content": suggestion})
+                    save_message(st.session_state.current_session_id, "user", suggestion)
+                    st.session_state.show_suggestions = False
+                    st.experimental_rerun()
+
+# --- User input handling
 prompt = st.chat_input("Type your message here...")
 
 if prompt:
@@ -414,22 +378,18 @@ if prompt:
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, prompt, st.session_state.llm)
 
-    # Get conversation history (excluding the current user message)
     chat_history = get_chat_history_for_llm(st.session_state.messages[:-1])
-    
-    # Invoke LLM with full conversation context
     formatted = prompt_template.invoke({
         "chat_history": chat_history,
         "input": prompt
     })
     assistant_reply = st.session_state.llm.invoke(formatted)
-
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
-    
-    st.session_state.show_suggestions = False
 
-    st.rerun()
+    st.session_state.show_suggestions = True
+
+    st.experimental_rerun()
 
 # ================== CUSTOM CSS ==================
 st.markdown("""
