@@ -20,7 +20,7 @@ def is_valid_email(email):
 def get_db():
     mongo_uri = st.secrets["MONGO_URI"]
     client = MongoClient(mongo_uri)
-    db = client["chat_app"]
+    db = client["chat_app"]   # database name
     return db
 
 # ================== USERS ==================
@@ -128,22 +128,6 @@ def get_chat_history_for_llm(messages):
             history.append(AIMessage(content=msg["content"]))
     return history
 
-# ================== DYNAMIC SUGGESTIONS ==================
-def get_dynamic_suggestions(llm, messages):
-    """Generate contextual suggestions based on conversation"""
-    try:
-        suggestion_prompt = "Based on our conversation, suggest 3 short helpful questions or topics the user might want to explore next. Format: question1 | question2 | question3"
-        history = get_chat_history_for_llm(messages)
-        formatted = prompt_template.invoke({
-            "chat_history": history,
-            "input": suggestion_prompt
-        })
-        response = llm.invoke(formatted)
-        suggestions = [s.strip() for s in response.content.split('|') if s.strip()]
-        return suggestions[:3]  # max 3 suggestions
-    except Exception as e:
-        return ["Tell me more", "What else can help?", "Any other advice?"]
-
 # ================== AUTO SESSION NAMING ==================
 def generate_session_name(llm, first_message: str) -> str:
     try:
@@ -161,7 +145,7 @@ def handle_suggestion(suggestion_text):
 
     db = get_db()
     sessions = db["chat_sessions"].find_one({"session_id": st.session_state.current_session_id})
-    current_name = sessions.get("session_name", "New Chat") if sessions else "New Chat"
+    current_name = sessions.get("session_name", "New Chat")
 
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, suggestion_text, st.session_state.llm)
@@ -176,8 +160,7 @@ def handle_suggestion(suggestion_text):
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
 
-    # Enable suggestions after bot response
-    st.session_state.show_suggestions = True
+    st.session_state.show_suggestions = False
 
 # ================== STREAMLIT APP ==================
 if "logged_in" not in st.session_state:
@@ -241,7 +224,7 @@ if "current_session_id" in st.session_state:
     db_messages = get_session_messages(st.session_state.current_session_id)
     if db_messages:
         st.session_state.messages = db_messages
-        st.session_state.show_suggestions = True  # Show suggestions for existing chats too
+        st.session_state.show_suggestions = False
     elif "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
@@ -293,7 +276,7 @@ with st.sidebar:
             if st.button(display_name, key=s["session_id"]):
                 st.session_state.current_session_id = s["session_id"]
                 st.session_state.messages = msgs
-                st.session_state.show_suggestions = True
+                st.session_state.show_suggestions = False
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s['session_id']}"):
@@ -328,26 +311,21 @@ with chat_container:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== SUGGESTION BUTTONS ==========
-if st.session_state.show_suggestions:
-    # Show initial suggestions only for new/empty chats
-    if len(st.session_state.messages) <= 1:
-        st.markdown("### 💡 Try asking about:")
-        suggestions = [
-            "😰 I'm feeling anxious today",
-            "😔 How to cope with stress?",
-            "🧘 Mindfulness exercises",
-            "💤 Tips for better sleep",
-            "🎯 Setting healthy goals"
-        ]
-    else:
-        # Generate dynamic suggestions based on conversation
-        st.markdown("### 💡 You could also ask:")
-        suggestions = get_dynamic_suggestions(st.session_state.llm, st.session_state.messages)
+if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
+    st.markdown("### 💡 Try asking about:")
+    
+    suggestions = [
+        "😰 I'm feeling anxious today",
+        "😔 How to cope with stress?",
+        "🧘 Mindfulness exercises",
+        "💤 Tips for better sleep",
+        "🎯 Setting healthy goals"
+    ]
     
     cols = st.columns(len(suggestions))
     for idx, suggestion in enumerate(suggestions):
         with cols[idx]:
-            if st.button(suggestion, key=f"suggestion_{idx}_{len(st.session_state.messages)}"):
+            if st.button(suggestion, key=f"suggestion_{idx}"):
                 handle_suggestion(suggestion)
                 st.rerun()
 
@@ -375,8 +353,7 @@ if prompt:
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
     
-    # Enable suggestions after bot response
-    st.session_state.show_suggestions = True
+    st.session_state.show_suggestions = False
     st.rerun()
 
 # ================== CUSTOM CSS ==================
