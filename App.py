@@ -79,7 +79,7 @@ def login_user(email, password):
     conn.close()
 
     if user and bcrypt.checkpw(password.encode(), user[2]):
-        return True, user[0], user[1]  # Return True, user ID, and username
+        return True, user[0], user[1]
     return False, None, None
 
 def create_new_session(user_id, session_name="New Chat"):
@@ -164,6 +164,36 @@ def update_session_name_with_llm(session_id, first_message, llm):
     conn.commit()
     conn.close()
 
+# ================== HANDLE SUGGESTION CLICK ==================
+def handle_suggestion(suggestion_text):
+    """Process a suggestion button click"""
+    st.session_state.messages.append({"role": "user", "content": suggestion_text})
+    save_message(st.session_state.current_session_id, "user", suggestion_text)
+    
+    # Check if session name needs updating
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", 
+                  (st.session_state.current_session_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    current_name = result[0] if result and result[0] else "New Chat"
+    
+    if current_name == "New Chat":
+        update_session_name_with_llm(st.session_state.current_session_id, 
+                                     suggestion_text, st.session_state.llm)
+    
+    # Get AI response
+    formatted = prompt_template.format_messages(input=suggestion_text)
+    assistant_reply = st.session_state.llm.invoke(formatted)
+    
+    st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
+    save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
+    
+    # Hide suggestions after first interaction
+    st.session_state.show_suggestions = False
+
 # ================== STREAMLIT APP ==================
 init_database()
 
@@ -210,6 +240,7 @@ if not st.session_state.logged_in:
                 st.session_state.messages = [
                     {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                 ]
+                st.session_state.show_suggestions = True  # Show suggestions on new chat
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -221,6 +252,9 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
     ]
+
+if "show_suggestions" not in st.session_state:
+    st.session_state.show_suggestions = True
 
 if "current_session_id" not in st.session_state:
     if "user_id" in st.session_state:
@@ -236,7 +270,6 @@ if "llm" not in st.session_state:
 with st.sidebar:
     st.title("💬 Mindful AI")
     
-    # Display username
     if "username" in st.session_state:
         st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
     
@@ -247,6 +280,7 @@ with st.sidebar:
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
         ]
+        st.session_state.show_suggestions = True  # Show suggestions for new chat
         st.rerun()
 
     conn = sqlite3.connect('chat_history.db')
@@ -260,7 +294,6 @@ with st.sidebar:
     for s_id, s_name in sessions:
         msgs = get_session_messages(s_id)
         
-        # Skip empty sessions
         if len(msgs) == 0:
             continue
         
@@ -271,6 +304,7 @@ with st.sidebar:
             if st.button(display_name, key=s_id):
                 st.session_state.current_session_id = s_id
                 st.session_state.messages = msgs
+                st.session_state.show_suggestions = False  # Hide suggestions when loading old chat
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s_id}"):
@@ -286,6 +320,7 @@ with st.sidebar:
                     st.session_state.messages = [
                         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                     ]
+                    st.session_state.show_suggestions = True
                 
                 st.rerun()
 
@@ -307,6 +342,29 @@ with chat_container:
         else:
             st.markdown(f'<div class="assistant-message"><div class="markdown">{message["content"]}</div></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
+# ========== SUGGESTION BUTTONS ==========
+# Show suggestions only for new chats or when explicitly enabled
+if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
+    st.markdown("### 💡 Try asking about:")
+    
+    # Define suggestion options
+    suggestions = [
+        "😰 I'm feeling anxious today",
+        "😔 How to cope with stress?",
+        "🧘 Mindfulness exercises",
+        "💤 Tips for better sleep",
+        "🎯 Setting healthy goals"
+    ]
+    
+    # Create columns for buttons
+    cols = st.columns(len(suggestions))
+    
+    for idx, suggestion in enumerate(suggestions):
+        with cols[idx]:
+            if st.button(suggestion, key=f"suggestion_{idx}"):
+                handle_suggestion(suggestion)
+                st.rerun()
 
 # ========== USER INPUT ==========
 prompt = st.chat_input("Type your message here...")
@@ -331,6 +389,9 @@ if prompt:
 
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
+    
+    # Hide suggestions after first message
+    st.session_state.show_suggestions = False
 
     st.rerun()
 
@@ -339,7 +400,7 @@ st.markdown("""
 <style>
 /* Remove borders and styling from chat messages */
 .chat-messages {
-    max-height: calc(100vh - 10rem);
+    max-height: calc(100vh - 15rem);
     overflow-y: auto;
     padding: 1rem 2rem;
 }
