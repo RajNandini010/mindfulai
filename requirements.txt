@@ -1,3 +1,4 @@
+bcrypt
 streamlit
 langchain
 langchain_groq
@@ -5,3 +6,4 @@ chromadb
 sentence-transformers
 pypdf
 langchain_community
+
