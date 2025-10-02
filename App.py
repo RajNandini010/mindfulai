@@ -17,11 +17,12 @@ def is_valid_email(email):
     return re.match(pattern, email) is not None
 
 # ================== DATABASE CONNECTION ==================
+@st.cache_resource
 def get_db():
     mongo_uri = st.secrets["MONGO_URI"]
-    client = MongoClient(mongo_uri)
-    db = client["chat_app"]   # database name
-    return db
+    client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
+    return client["chat_app"]
+
 
 # ================== USERS ==================
 def register_user(username, email, password):
@@ -112,12 +113,17 @@ prompt_template = ChatPromptTemplate.from_messages([
     ("human", "{input}")
 ])
 
-def initialize_llm():
+@st.cache_resource
+def load_llm():
     return ChatGroq(
         temperature=0.3,
-        groq_api_key=os.getenv("GROQ_API_KEY", "your_api_key_here"),
+        groq_api_key=st.secrets["GROQ_API_KEY"],
         model_name="llama-3.1-8b-instant"
     )
+
+if "llm" not in st.session_state:
+    st.session_state.llm = load_llm()
+
 
 def get_chat_history_for_llm(messages):
     history = []
@@ -392,6 +398,7 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
 
 
 
