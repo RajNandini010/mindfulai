@@ -66,6 +66,7 @@ def login_user(username, password):
     user = cursor.fetchone()
     conn.close()
 
+    # Check if user exists before accessing elements
     if user and bcrypt.checkpw(password.encode(), user[1]):
         return True, user[0]  # Return True and user ID
     return False, None
@@ -104,6 +105,11 @@ def get_session_messages(session_id):
     ''', (session_id,))
     messages = cursor.fetchall()
     conn.close()
+    
+    # Return empty list if no messages, not None
+    if not messages:
+        return []
+    
     return [{"role": "user" if m[0]=="user" else "assistant", "content": m[1]} for m in messages]
 
 # ================== LLM ==================
@@ -123,16 +129,19 @@ prompt_template = ChatPromptTemplate.from_messages([
 def initialize_llm():
     return ChatGroq(
         temperature=0.3,
-        groq_api_key=os.getenv("GROQ_API_KEY", "api_here"),
+        groq_api_key=os.getenv("GROQ_API_KEY", "your_api_key_here"),
         model_name="llama-3.1-8b-instant"
     )
 
 # ================== AUTO SESSION NAMING ==================
 def generate_session_name(llm, first_message: str) -> str:
-    instruction = f"Summarize this message into 3-4 words for a chat title:\n\n{first_message}"
-    response = llm.invoke(instruction)
-    title = response.content.strip()
-    return f"Chat about {title}"
+    try:
+        instruction = f"Summarize this message into 3-4 words for a chat title:\n\n{first_message}"
+        response = llm.invoke(instruction)
+        title = response.content.strip()
+        return f"Chat about {title}"
+    except Exception as e:
+        return "New Chat"
 
 def update_session_name_with_llm(session_id, first_message, llm):
     session_name = generate_session_name(llm, first_message)
@@ -175,18 +184,26 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
                 st.session_state.current_session_id = create_new_session(user_id)
-                st.rerun() # Formerly st.experimental_rerun()
+                st.session_state.messages = [
+                    {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+                ]
+                st.rerun()
             else:
                 st.error("Invalid credentials")
     st.stop()
 
+# Initialize session state variables
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
     ]
 
 if "current_session_id" not in st.session_state:
-    st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+    if "user_id" in st.session_state:
+        st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+    else:
+        st.session_state.logged_in = False
+        st.rerun()
 
 if "llm" not in st.session_state:
     st.session_state.llm = initialize_llm()
@@ -213,14 +230,24 @@ with st.sidebar:
 
     for s_id, s_name in sessions:
         msgs = get_session_messages(s_id)
-        if s_name == "New Chat" and len(msgs) == 0:
-            s_name = "🆕 New Chat"
+        
+        # Display name
+        display_name = s_name if s_name else "New Chat"
+        if display_name == "New Chat" and len(msgs) == 0:
+            display_name = "🆕 New Chat"
 
         col1, col2 = st.columns([0.8, 0.2])
         with col1:
-            if st.button(s_name, key=s_id):
+            if st.button(display_name, key=s_id):
                 st.session_state.current_session_id = s_id
-                st.session_state.messages = msgs
+                # Load messages or use default if empty
+                loaded_msgs = get_session_messages(s_id)
+                if loaded_msgs:
+                    st.session_state.messages = loaded_msgs
+                else:
+                    st.session_state.messages = [
+                        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+                    ]
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s_id}"):
@@ -230,13 +257,24 @@ with st.sidebar:
                 cursor.execute("DELETE FROM chat_sessions WHERE session_id=?", (s_id,))
                 conn.commit()
                 conn.close()
+                
+                # If deleted current session, create new one
+                if s_id == st.session_state.current_session_id:
+                    st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+                    st.session_state.messages = [
+                        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+                    ]
+                
                 st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("🚪 Logout"):
+        # Clear all session state
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.session_state.logged_in = False
-        st.rerun() # Formerly st.experimental_rerun()
+        st.rerun()
 
 # ========== CHAT UI ==========
 chat_container = st.container()
@@ -256,11 +294,15 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.current_session_id, "user", prompt)
 
+    # Check session name with None handling
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
     cursor.execute("SELECT session_name FROM chat_sessions WHERE session_id=?", (st.session_state.current_session_id,))
-    current_name = cursor.fetchone()[0]
+    result = cursor.fetchone()
     conn.close()
+
+    # Safe access to session name
+    current_name = result[0] if result and result[0] else "New Chat"
 
     if current_name == "New Chat":
         update_session_name_with_llm(st.session_state.current_session_id, prompt, st.session_state.llm)
@@ -308,4 +350,3 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
