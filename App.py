@@ -2,11 +2,18 @@ import uuid
 import sqlite3
 from datetime import datetime
 import os
+import re
 import bcrypt
 import streamlit as st
 
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate
+
+# ================== EMAIL VALIDATION ==================
+def is_valid_email(email):
+    """Validate email format using regex"""
+    pattern = r'^[\w\.-]+@[a-zA-Z\d-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
 
 # ================== DATABASE ==================
 def init_database():
@@ -16,7 +23,8 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
+            username TEXT,
+            email TEXT UNIQUE,
             password TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -46,29 +54,33 @@ def init_database():
     conn.commit()
     conn.close()
 
-def register_user(username, password):
+def register_user(username, email, password):
+    if not is_valid_email(email):
+        return False, "Invalid email format"
+    
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
     try:
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_pw))
+        cursor.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", 
+                      (username, email, hashed_pw))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
-        return False, "Username already exists"
+        return False, "Email already exists"
     conn.close()
     return True, "Registration successful"
 
-def login_user(username, password):
+def login_user(email, password):
     conn = sqlite3.connect('chat_history.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT id, password FROM users WHERE username=?", (username,))
+    cursor.execute("SELECT id, username, password FROM users WHERE email=?", (email,))
     user = cursor.fetchone()
     conn.close()
 
-    if user and bcrypt.checkpw(password.encode(), user[1]):
-        return True, user[0]
-    return False, None
+    if user and bcrypt.checkpw(password.encode(), user[2]):
+        return True, user[0], user[1]  # Return True, user ID, and username
+    return False, None, None
 
 def create_new_session(user_id, session_name="New Chat"):
     session_id = str(uuid.uuid4())
@@ -164,23 +176,36 @@ if not st.session_state.logged_in:
 
     option = st.radio("Choose action", ("Login", "Register"))
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button(option):
-        if option == "Register":
-            success, msg = register_user(username, password)
-            
-            if success:
-                st.success(msg)
+    if option == "Register":
+        username = st.text_input("Username")
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Register"):
+            if not username:
+                st.error("Please enter a username")
+            elif not email:
+                st.error("Please enter an email")
+            elif not password:
+                st.error("Please enter a password")
             else:
-                st.error(msg)
-
-        else:
-            success, user_id = login_user(username, password)
+                success, msg = register_user(username, email, password)
+                if success:
+                    st.success(msg)
+                    st.info("Please login with your credentials")
+                else:
+                    st.error(msg)
+    
+    else:  # Login
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Login"):
+            success, user_id, username = login_user(email, password)
             if success:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
+                st.session_state.username = username
                 st.session_state.current_session_id = create_new_session(user_id)
                 st.session_state.messages = [
                     {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
@@ -188,6 +213,7 @@ if not st.session_state.logged_in:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
+    
     st.stop()
 
 # Initialize session state variables
@@ -209,6 +235,11 @@ if "llm" not in st.session_state:
 # ========== SIDEBAR ==========
 with st.sidebar:
     st.title("💬 Mindful AI")
+    
+    # Display username
+    if "username" in st.session_state:
+        st.markdown(f"### 👤 Welcome, **{st.session_state.username}**!")
+    
     st.write("Your conversations")
 
     if st.button("➕ New Chat"):
@@ -326,8 +357,8 @@ st.markdown("""
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 5px 20px;
     max-width: 70%;
-    border: none;  /* Remove border */
-    box-shadow: none;  /* Remove shadow */
+    border: none;
+    box-shadow: none;
 }
 
 .assistant-message {
@@ -343,8 +374,8 @@ st.markdown("""
     padding: 0.8rem 1.2rem;
     border-radius: 20px 20px 20px 5px;
     max-width: 70%;
-    border: none;  /* Remove border */
-    box-shadow: none;  /* Remove shadow */
+    border: none;
+    box-shadow: none;
 }
 
 /* Remove borders from sidebar buttons */
