@@ -236,35 +236,53 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
                 st.session_state.username = username
-                st.session_state.current_session_id = create_new_session(user_id)
+                
+                # Create new session and initialize with welcome message
+                new_session_id = create_new_session(user_id)
+                st.session_state.current_session_id = new_session_id
                 st.session_state.messages = [
                     {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                 ]
-                st.session_state.show_suggestions = True  # Show suggestions on new chat
+                st.session_state.show_suggestions = True
                 st.rerun()
             else:
                 st.error("Invalid credentials")
     
     st.stop()
 
-# Initialize session state variables
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
-    ]
+# ========== INITIALIZE SESSION STATE ==========
+if "llm" not in st.session_state:
+    st.session_state.llm = initialize_llm()
 
 if "show_suggestions" not in st.session_state:
     st.session_state.show_suggestions = True
 
-if "current_session_id" not in st.session_state:
+# Load messages from database if current_session_id exists
+if "current_session_id" in st.session_state:
+    # Load existing messages from database for this session
+    db_messages = get_session_messages(st.session_state.current_session_id)
+    
+    if db_messages:
+        # Session has messages in database, load them
+        st.session_state.messages = db_messages
+        st.session_state.show_suggestions = False
+    elif "messages" not in st.session_state:
+        # New session with no messages, show welcome
+        st.session_state.messages = [
+            {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+        ]
+        st.session_state.show_suggestions = True
+else:
+    # No current session, create one
     if "user_id" in st.session_state:
         st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+        st.session_state.messages = [
+            {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
+        ]
+        st.session_state.show_suggestions = True
     else:
         st.session_state.logged_in = False
         st.rerun()
-
-if "llm" not in st.session_state:
-    st.session_state.llm = initialize_llm()
 
 # ========== SIDEBAR ==========
 with st.sidebar:
@@ -276,11 +294,15 @@ with st.sidebar:
     st.write("Your conversations")
 
     if st.button("➕ New Chat"):
-        st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+        # Create new session
+        new_session_id = create_new_session(st.session_state.user_id)
+        st.session_state.current_session_id = new_session_id
+        
+        # Reset messages to welcome message only
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
         ]
-        st.session_state.show_suggestions = True  # Show suggestions for new chat
+        st.session_state.show_suggestions = True
         st.rerun()
 
     conn = sqlite3.connect('chat_history.db')
@@ -304,7 +326,7 @@ with st.sidebar:
             if st.button(display_name, key=s_id):
                 st.session_state.current_session_id = s_id
                 st.session_state.messages = msgs
-                st.session_state.show_suggestions = False  # Hide suggestions when loading old chat
+                st.session_state.show_suggestions = False
                 st.rerun()
         with col2:
             if st.button("🗑️", key=f"del-{s_id}"):
@@ -315,8 +337,10 @@ with st.sidebar:
                 conn.commit()
                 conn.close()
                 
+                # If deleted current session, create new one
                 if s_id == st.session_state.current_session_id:
-                    st.session_state.current_session_id = create_new_session(st.session_state.user_id)
+                    new_session_id = create_new_session(st.session_state.user_id)
+                    st.session_state.current_session_id = new_session_id
                     st.session_state.messages = [
                         {"role": "assistant", "content": "👋 Hi! I'm Mindful AI, your compassionate support companion. How can I help you today?"}
                     ]
@@ -344,11 +368,9 @@ with chat_container:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== SUGGESTION BUTTONS ==========
-# Show suggestions only for new chats or when explicitly enabled
 if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
     st.markdown("### 💡 Try asking about:")
     
-    # Define suggestion options
     suggestions = [
         "😰 I'm feeling anxious today",
         "😔 How to cope with stress?",
@@ -357,7 +379,6 @@ if st.session_state.show_suggestions and len(st.session_state.messages) <= 1:
         "🎯 Setting healthy goals"
     ]
     
-    # Create columns for buttons
     cols = st.columns(len(suggestions))
     
     for idx, suggestion in enumerate(suggestions):
@@ -390,7 +411,6 @@ if prompt:
     st.session_state.messages.append({"role": "assistant", "content": assistant_reply.content})
     save_message(st.session_state.current_session_id, "assistant", assistant_reply.content)
     
-    # Hide suggestions after first message
     st.session_state.show_suggestions = False
 
     st.rerun()
@@ -398,7 +418,6 @@ if prompt:
 # ================== CUSTOM CSS ==================
 st.markdown("""
 <style>
-/* Remove borders and styling from chat messages */
 .chat-messages {
     max-height: calc(100vh - 15rem);
     overflow-y: auto;
@@ -439,7 +458,6 @@ st.markdown("""
     box-shadow: none;
 }
 
-/* Remove borders from sidebar buttons */
 .stButton button {
     border: none !important;
     box-shadow: none !important;
