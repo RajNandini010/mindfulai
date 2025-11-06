@@ -1,6 +1,7 @@
 bcrypt
 streamlit
 langchain
+langchain-core
 langchain_groq
 chromadb
 sentence-transformers
@@ -8,6 +9,8 @@ pypdf
 langchain_community
 pymongo[srv]
 dnspython
+
+
 
 
 
