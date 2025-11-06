@@ -7,8 +7,9 @@ from datetime import datetime
 from pymongo import MongoClient
 
 from langchain_groq import ChatGroq
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
+
 
 # ================== EMAIL VALIDATION ==================
 def is_valid_email(email):
@@ -430,4 +431,5 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
 
