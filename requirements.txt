@@ -9,8 +9,3 @@ pypdf
 langchain_community
 pymongo[srv]
 dnspython
-
-
-
-
-
